@@ -1,0 +1,6 @@
+{
+  "name": "Volume Control",
+  "description": "A modern volume controller utility app with touch sliders to easily adjust, mute, and preset all system audio stream levels without using physical buttons.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
