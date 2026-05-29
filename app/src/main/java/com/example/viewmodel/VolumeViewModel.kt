@@ -112,7 +112,5 @@ class VolumeViewModel(application: Application) : AndroidViewModel(application) 
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        System.runFinalization()
-        System.gc()
     }
 }

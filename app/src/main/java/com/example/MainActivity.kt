@@ -25,8 +25,5 @@ class MainActivity : ComponentActivity() {
 
   override fun onTrimMemory(level: Int) {
     super.onTrimMemory(level)
-    if (level >= TRIM_MEMORY_BACKGROUND) {
-      System.gc()
-    }
   }
 }

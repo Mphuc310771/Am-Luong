@@ -409,9 +409,6 @@ class VolumeControlService : Service() {
             it.onDestroy()
             floatingHandleLifecycleOwner = null
         }
-        // Force Garbage Collector to instantly release dereferenced memory from heap
-        System.runFinalization()
-        System.gc()
     }
 
     private fun showOverlayPanel() {
@@ -545,10 +542,6 @@ class VolumeControlService : Service() {
             e.printStackTrace()
         }
         database = null
-        
-        // Force Garbage Collector to instantly release dereferenced memory from heap
-        System.runFinalization()
-        System.gc()
     }
 
     override fun onDestroy() {
@@ -604,8 +597,6 @@ class VolumeControlService : Service() {
                 e.printStackTrace()
             }
         }
-        System.runFinalization()
-        System.gc()
     }
 
     override fun onLowMemory() {
@@ -617,8 +608,6 @@ class VolumeControlService : Service() {
                 e.printStackTrace()
             }
         }
-        System.runFinalization()
-        System.gc()
     }
 }
 
