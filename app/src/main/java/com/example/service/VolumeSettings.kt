@@ -5,13 +5,55 @@ import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-class VolumeSettings(context: Context) {
+class VolumeSettings private constructor(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    private val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        when (key) {
+            KEY_HANDLE_ENABLED -> _isHandleEnabledFlow.value = isHandleEnabled
+            KEY_HANDLE_SIDE -> _handleSideFlow.value = handleSide
+            KEY_HANDLE_OPACITY -> _handleOpacityFlow.value = handleOpacity
+            KEY_HANDLE_HEIGHT -> _handleHeightFlow.value = handleHeight
+            KEY_HANDLE_Y_OFFSET -> _handleYOffsetFlow.value = handleYOffset
+            KEY_HANDLE_DRAG_ACTION -> _handleDragActionFlow.value = handleDragAction
+            KEY_COMPACT_MODE -> _isCompactModeFlow.value = isCompactMode
+        }
+    }
+
+    init {
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+    }
+
+    fun unregister() {
+        // Since it's a process-wide singleton now, we keep the listener alive for the process lifecycle.
+        // This avoids continuous register/unregister overhead.
+    }
+
+    fun updateHandleHeightInMemory(value: Int) {
+        _handleHeightFlow.value = value
+    }
+
+    fun updateHandleOpacityInMemory(value: Float) {
+        _handleOpacityFlow.value = value
+    }
+
+    fun updateHandleYOffsetInMemory(value: Int) {
+        _handleYOffsetFlow.value = value
+    }
 
     companion object {
         private const val PREFS_NAME = "volume_settings"
         private const val KEY_SERVICE_RUNNING = "service_running"
         private const val KEY_HANDLE_ENABLED = "handle_enabled"
+
+        @Volatile
+        private var INSTANCE: VolumeSettings? = null
+
+        fun getInstance(context: Context): VolumeSettings {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: VolumeSettings(context.applicationContext).also { INSTANCE = it }
+            }
+        }
         private const val KEY_HANDLE_SIDE = "handle_side" // "LEFT" or "RIGHT"
         private const val KEY_HANDLE_OPACITY = "handle_opacity"
         private const val KEY_HANDLE_HEIGHT = "handle_height"

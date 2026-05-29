@@ -18,9 +18,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class VolumeViewModel(application: Application) : AndroidViewModel(application) {
-    private val database = AppDatabase.getDatabase(application, viewModelScope)
+    private val database = AppDatabase.getDatabase(application)
     private val repository = VolumePresetRepository(database.volumePresetDao())
-    val settings = VolumeSettings(application)
+    val settings = VolumeSettings.getInstance(application)
     private val audioManager = application.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     val allPresets: StateFlow<List<VolumePreset>> = repository.allPresets
@@ -103,5 +103,16 @@ class VolumeViewModel(application: Application) : AndroidViewModel(application) 
         audioManager.setStreamVolume(AudioManager.STREAM_RING, rVol, 0)
         audioManager.setStreamVolume(AudioManager.STREAM_ALARM, aVol, 0)
         audioManager.setStreamVolume(AudioManager.STREAM_NOTIFICATION, nVol, 0)
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        try {
+            AppDatabase.closeDatabase()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        System.runFinalization()
+        System.gc()
     }
 }

@@ -15,7 +15,11 @@ class VolumeTileService : TileService() {
         val serviceIntent = Intent(this, VolumeControlService::class.java).apply {
             action = VolumeControlService.ACTION_SHOW_OVERLAY
         }
-        startService(serviceIntent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
 
         // Close/collapse the quick settings notifications panel so the overlay is instantly visible
         try {

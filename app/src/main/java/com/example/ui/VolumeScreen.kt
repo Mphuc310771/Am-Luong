@@ -53,6 +53,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.database.VolumePreset
 import com.example.service.VolumeSettings
 import com.example.viewmodel.VolumeViewModel
+import androidx.compose.ui.res.vectorResource
+import com.example.R
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,8 +101,8 @@ fun VolumeScreen(
         contract = ActivityResultContracts.StartActivityForResult()
     ) {
         hasOverlayPermission = Settings.canDrawOverlays(context)
-        // Auto start service if permitted and turned on
-        if (hasOverlayPermission && viewModel.settings.isServiceRunning && !isServiceRunning) {
+        // Auto start / refresh service if permitted and turned on
+        if (hasOverlayPermission && viewModel.settings.isServiceRunning) {
             viewModel.startVolumeService()
         }
     }
@@ -112,12 +114,25 @@ fun VolumeScreen(
         hasNotificationPermission = isGranted
     }
 
-    // Refresh live sliders on start or resume
-    LaunchedEffect(Unit) {
-        liveMedia = viewModel.getStreamPercentage(AudioManager.STREAM_MUSIC)
-        liveRing = viewModel.getStreamPercentage(AudioManager.STREAM_RING)
-        liveAlarm = viewModel.getStreamPercentage(AudioManager.STREAM_ALARM)
-        liveNotif = viewModel.getStreamPercentage(AudioManager.STREAM_NOTIFICATION)
+    // Auto-refresh permission & live sliders state on lifecycle Resume
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasOverlayPermission = Settings.canDrawOverlays(context)
+                if (hasOverlayPermission && viewModel.settings.isServiceRunning) {
+                    viewModel.startVolumeService()
+                }
+                liveMedia = viewModel.getStreamPercentage(AudioManager.STREAM_MUSIC)
+                liveRing = viewModel.getStreamPercentage(AudioManager.STREAM_RING)
+                liveAlarm = viewModel.getStreamPercentage(AudioManager.STREAM_ALARM)
+                liveNotif = viewModel.getStreamPercentage(AudioManager.STREAM_NOTIFICATION)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     // Keep app UI sliders in Sync with hardware physical buttons in real time
@@ -155,7 +170,7 @@ fun VolumeScreen(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.VolumeUp,
+                            imageVector = ImageVector.vectorResource(id = R.drawable.ic_volume_up),
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(28.dp)
@@ -428,7 +443,7 @@ fun VolumeScreen(
                                     liveMedia = pct.toInt()
                                     viewModel.setStreamPercentage(AudioManager.STREAM_MUSIC, pct.toInt(), playSound = true)
                                 },
-                                icon = Icons.Default.MusicNote,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_music_note),
                                 label = "Media"
                             )
 
@@ -441,7 +456,7 @@ fun VolumeScreen(
                                     liveRing = pct.toInt()
                                     viewModel.setStreamPercentage(AudioManager.STREAM_RING, pct.toInt(), playSound = true)
                                 },
-                                icon = Icons.Default.RingVolume,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_ring_volume),
                                 label = "Chuông"
                             )
 
@@ -454,7 +469,7 @@ fun VolumeScreen(
                                     liveNotif = pct.toInt()
                                     viewModel.setStreamPercentage(AudioManager.STREAM_NOTIFICATION, pct.toInt(), playSound = true)
                                 },
-                                icon = Icons.Default.Notifications,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_notifications),
                                 label = "T.Báo"
                             )
 
@@ -467,7 +482,7 @@ fun VolumeScreen(
                                     liveAlarm = pct.toInt()
                                     viewModel.setStreamPercentage(AudioManager.STREAM_ALARM, pct.toInt(), playSound = true)
                                 },
-                                icon = Icons.Default.Alarm,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_alarm),
                                 label = "Báo thức"
                             )
                         }
@@ -582,6 +597,7 @@ fun VolumeScreen(
                                         value = handleHeight,
                                         onValueChange = { h ->
                                             handleHeight = h
+                                            viewModel.settings.updateHandleHeightInMemory(h.toInt())
                                         },
                                         onValueChangeFinished = {
                                             viewModel.settings.handleHeight = handleHeight.toInt()
@@ -604,11 +620,12 @@ fun VolumeScreen(
                                         value = handleOpacity,
                                         onValueChange = { o ->
                                             handleOpacity = o
+                                            viewModel.settings.updateHandleOpacityInMemory(o)
                                         },
                                         onValueChangeFinished = {
                                             viewModel.settings.handleOpacity = handleOpacity
                                         },
-                                        valueRange = 0.15f..1.0f,
+                                        valueRange = 0.0f..1.0f,
                                         modifier = Modifier.height(32.dp)
                                     )
                                 }
@@ -627,6 +644,7 @@ fun VolumeScreen(
                                         value = handleYOffset,
                                         onValueChange = { y ->
                                             handleYOffset = y
+                                            viewModel.settings.updateHandleYOffsetInMemory(y.toInt())
                                         },
                                         onValueChangeFinished = {
                                             viewModel.settings.handleYOffset = handleYOffset.toInt()
@@ -671,7 +689,7 @@ fun VolumeScreen(
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
                                                 Icon(
-                                                    Icons.Default.MusicNote,
+                                                    ImageVector.vectorResource(id = R.drawable.ic_music_note),
                                                     contentDescription = null,
                                                     tint = if (handleDragAction == "VOLUME") 
                                                         MaterialTheme.colorScheme.primary 
@@ -712,7 +730,7 @@ fun VolumeScreen(
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
                                                 Icon(
-                                                    Icons.Default.UnfoldMore,
+                                                    ImageVector.vectorResource(id = R.drawable.ic_unfold_more),
                                                     contentDescription = null,
                                                     tint = if (handleDragAction == "MOVE") 
                                                         MaterialTheme.colorScheme.primary 
@@ -805,7 +823,7 @@ fun VolumeScreen(
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Layers,
+                            imageVector = ImageVector.vectorResource(id = R.drawable.ic_layers),
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                             modifier = Modifier.size(48.dp)

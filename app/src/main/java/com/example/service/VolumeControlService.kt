@@ -9,6 +9,16 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.LinearGradient
+import android.graphics.Shader
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
+import kotlin.math.abs
 import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
@@ -40,6 +50,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ComposeView
@@ -75,14 +86,15 @@ class VolumeControlService : Service() {
 
     private lateinit var windowManager: WindowManager
     private var floatingHandleView: android.view.View? = null
-    private var overlayPanelView: android.view.View? = null
+    private var overlayComposeView: ComposeView? = null
     private var floatingHandleLifecycleOwner: ServiceLifecycleOwner? = null
     private var overlayPanelLifecycleOwner: ServiceLifecycleOwner? = null
+    private var floatingHandleParams: WindowManager.LayoutParams? = null
     
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var settings: VolumeSettings
     private lateinit var audioManager: AudioManager
-    private lateinit var database: AppDatabase
+    private var database: AppDatabase? = null
 
     companion object {
         private const val CHANNEL_ID = "volume_control_channel_v1"
@@ -105,52 +117,89 @@ class VolumeControlService : Service() {
         super.onCreate()
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        settings = VolumeSettings(this)
-        database = AppDatabase.getDatabase(this, serviceScope)
+        settings = VolumeSettings.getInstance(this)
         _isRunning.value = true
 
         createNotificationChannel()
         startServiceInForeground()
 
-        // Reactively listen to settings updates to redraw the floating handle if needed
+        // Reactively listen to settings updates dynamically with high performance and 0 leaks
         serviceScope.launch {
-            combineSettingsFlows().collectLatest {
-                setupFloatingHandle()
+            settings.isHandleEnabledFlow.collectLatest { enabled ->
+                if (enabled) {
+                    if (floatingHandleView == null) {
+                        setupFloatingHandle()
+                    }
+                } else {
+                    removeFloatingHandle()
+                }
+            }
+        }
+
+        serviceScope.launch {
+            settings.handleSideFlow.collectLatest { side ->
+                val view = floatingHandleView ?: return@collectLatest
+                val params = floatingHandleParams ?: return@collectLatest
+                val newGravity = if (side == "LEFT") Gravity.START or Gravity.CENTER_VERTICAL else Gravity.END or Gravity.CENTER_VERTICAL
+                if (params.gravity != newGravity) {
+                    params.gravity = newGravity
+                    try {
+                        windowManager.updateViewLayout(view, params)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+
+        serviceScope.launch {
+            settings.handleYOffsetFlow.collectLatest { yOffset ->
+                val view = floatingHandleView ?: return@collectLatest
+                val params = floatingHandleParams ?: return@collectLatest
+                if (params.y != yOffset) {
+                    params.y = yOffset
+                    try {
+                        windowManager.updateViewLayout(view, params)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+
+        serviceScope.launch {
+            settings.handleHeightFlow.collectLatest { heightDp ->
+                val view = floatingHandleView ?: return@collectLatest
+                val params = floatingHandleParams ?: return@collectLatest
+                val newHeightPx = (heightDp * resources.displayMetrics.density).toInt()
+                if (params.height != newHeightPx) {
+                    params.height = newHeightPx
+                    try {
+                        windowManager.updateViewLayout(view, params)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+
+        serviceScope.launch {
+            settings.handleOpacityFlow.collectLatest { opacity ->
+                val view = floatingHandleView ?: return@collectLatest
+                view.invalidate()
             }
         }
     }
 
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private fun combineSettingsFlows() = kotlinx.coroutines.flow.combine(
-        kotlinx.coroutines.flow.combine(
-            settings.isHandleEnabledFlow,
-            settings.handleSideFlow,
-            settings.handleOpacityFlow,
-            ::Triple
-        ),
-        kotlinx.coroutines.flow.combine(
-            settings.handleHeightFlow,
-            settings.handleYOffsetFlow,
-            settings.handleDragActionFlow,
-            ::Triple
-        )
-    ) { part1, part2 ->
-        Sextuple(
-            part1.first,
-            part1.second,
-            part1.third,
-            part2.first,
-            part2.second,
-            part2.third
-        )
-    }
 
-    private data class Sextuple<A, B, C, D, E, F>(val first: A, val second: B, val third: C, val fourth: D, val fifth: E, val sixth: F)
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         if (action != null) {
             handleNotificationAction(action)
+        }
+        if (settings.isHandleEnabled && floatingHandleView == null && !_isOverlayVisible.value) {
+            setupFloatingHandle()
         }
         return START_STICKY
     }
@@ -292,9 +341,13 @@ class VolumeControlService : Service() {
             return
         }
 
+        val density = resources.displayMetrics.density
+        val widthPx = (18 * density).toInt()
+        val heightPx = (settings.handleHeight * density).toInt()
+
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            widthPx,
+            heightPx,
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             } else {
@@ -308,49 +361,31 @@ class VolumeControlService : Service() {
             x = 0
             y = settings.handleYOffset
         }
+        floatingHandleParams = params
 
-        val context = this
-        val composeView = ComposeView(context).apply {
-            val lifecycleOwner = ServiceLifecycleOwner().apply {
-                onCreate()
-                onStart()
-                onResume()
-            }
-            floatingHandleLifecycleOwner = lifecycleOwner
-            setViewTreeLifecycleOwner(lifecycleOwner)
-            setViewTreeViewModelStoreOwner(lifecycleOwner)
-            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
-            
-            setContent {
-                MaterialTheme {
-                    FloatingHandleUi(
-                        opacity = settings.handleOpacity,
-                        heightDp = settings.handleHeight,
-                        side = settings.handleSide,
-                        dragAction = settings.handleDragAction,
-                        onTap = {
-                            showOverlayPanel()
-                        },
-                        onVerticalDrag = { deltaY ->
-                            params.y = params.y + deltaY.toInt()
-                            try {
-                                windowManager.updateViewLayout(this@apply, params)
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
-                        },
-                        onDragEnd = {
-                            settings.handleYOffset = params.y
-                        },
-                        onVolumeAdjust = { increase ->
-                            adjustMusicVolume(increase)
-                        }
-                    )
+        val customView = FloatingHandleView(
+            context = this,
+            settings = settings,
+            onVolumeAdjust = { increase ->
+                adjustMusicVolume(increase)
+            },
+            onVerticalDrag = { deltaY ->
+                params.y = params.y + deltaY.toInt()
+                try {
+                    floatingHandleView?.let { windowManager.updateViewLayout(it, params) }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
+            },
+            onDragEnd = {
+                settings.handleYOffset = params.y
+            },
+            onTap = {
+                showOverlayPanel()
             }
-        }
+        )
 
-        floatingHandleView = composeView
+        floatingHandleView = customView
 
         try {
             windowManager.addView(floatingHandleView, params)
@@ -362,7 +397,7 @@ class VolumeControlService : Service() {
     private fun removeFloatingHandle() {
         floatingHandleView?.let {
             try {
-                windowManager.removeView(it)
+                windowManager.removeViewImmediate(it)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -374,6 +409,9 @@ class VolumeControlService : Service() {
             it.onDestroy()
             floatingHandleLifecycleOwner = null
         }
+        // Force Garbage Collector to instantly release dereferenced memory from heap
+        System.runFinalization()
+        System.gc()
     }
 
     private fun showOverlayPanel() {
@@ -386,11 +424,13 @@ class VolumeControlService : Service() {
             return
         }
 
-        if (overlayPanelView != null) return
-
         // Hide floating handle while panel is active
         removeFloatingHandle()
         _isOverlayVisible.value = true
+
+        if (database == null) {
+            database = AppDatabase.getDatabase(this)
+        }
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -407,70 +447,80 @@ class VolumeControlService : Service() {
             gravity = Gravity.CENTER
         }
 
-        val context = this
-        val composeView = ComposeView(context).apply {
+        if (overlayComposeView == null) {
+            val context = this
             val lifecycleOwner = ServiceLifecycleOwner().apply {
                 onCreate()
                 onStart()
                 onResume()
             }
             overlayPanelLifecycleOwner = lifecycleOwner
-            setViewTreeLifecycleOwner(lifecycleOwner)
-            setViewTreeViewModelStoreOwner(lifecycleOwner)
-            setViewTreeSavedStateRegistryOwner(lifecycleOwner)
 
-            setContent {
-                var visible by remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) {
-                    visible = true
-                }
-                
-                MaterialTheme {
-                    AnimatedVisibility(
-                        visible = visible,
-                        enter = slideInHorizontally(
-                            initialOffsetX = { if (settings.handleSide == "LEFT") -it else it },
-                            animationSpec = tween(durationMillis = 300)
-                        ) + fadeIn(),
-                        exit = slideOutHorizontally(
-                            targetOffsetX = { if (settings.handleSide == "LEFT") -it else it },
-                            animationSpec = tween(durationMillis = 250)
-                        ) + fadeOut()
-                    ) {
-                        OverlayPanelUi(
-                            audioManager = audioManager,
-                            database = database,
-                            settings = settings,
-                            onClose = {
-                                visible = false
-                                serviceScope.launch {
-                                    delay(200) // wait for exit animation
-                                    dismissOverlayPanel()
+            val composeView = ComposeView(context).apply {
+                setViewTreeLifecycleOwner(lifecycleOwner)
+                setViewTreeViewModelStoreOwner(lifecycleOwner)
+                setViewTreeSavedStateRegistryOwner(lifecycleOwner)
+
+                setContent {
+                    val overlayVisibleState by isOverlayVisible.collectAsState()
+                    var visible by remember { mutableStateOf(false) }
+
+                    LaunchedEffect(overlayVisibleState) {
+                        visible = overlayVisibleState
+                    }
+                    
+                    MaterialTheme {
+                        AnimatedVisibility(
+                            visible = visible,
+                            enter = slideInHorizontally(
+                                initialOffsetX = { if (settings.handleSide == "LEFT") -it else it },
+                                animationSpec = tween(durationMillis = 300)
+                            ) + fadeIn(),
+                            exit = slideOutHorizontally(
+                                targetOffsetX = { if (settings.handleSide == "LEFT") -it else it },
+                                animationSpec = tween(durationMillis = 250)
+                            ) + fadeOut()
+                        ) {
+                            OverlayPanelUi(
+                                audioManager = audioManager,
+                                database = database!!,
+                                settings = settings,
+                                onClose = {
+                                    _isOverlayVisible.value = false
+                                    serviceScope.launch {
+                                        delay(260) // wait for exit animation (250ms duration + buffer)
+                                        dismissOverlayPanel()
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
             }
+            overlayComposeView = composeView
         }
 
-        overlayPanelView = composeView
-
         try {
-            windowManager.addView(overlayPanelView, params)
+            val view = overlayComposeView ?: return
+            if (view.parent == null) {
+                windowManager.addView(view, params)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
     private fun dismissOverlayPanel() {
-        overlayPanelView?.let {
+        overlayComposeView?.let {
             try {
-                windowManager.removeView(it)
+                if (it.parent != null) {
+                    windowManager.removeViewImmediate(it)
+                }
+                it.disposeComposition()
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-            overlayPanelView = null
+            overlayComposeView = null
         }
         overlayPanelLifecycleOwner?.let {
             it.onPause()
@@ -480,101 +530,99 @@ class VolumeControlService : Service() {
         }
         _isOverlayVisible.value = false
         setupFloatingHandle() // Restore edge handle
+        
+        // Optimize and release SQLite Memory back to system on dismiss fast
+        database?.let { db ->
+            try {
+                db.openHelper.writableDatabase.execSQL("PRAGMA shrink_memory;")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        try {
+            AppDatabase.closeDatabase()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        database = null
+        
+        // Force Garbage Collector to instantly release dereferenced memory from heap
+        System.runFinalization()
+        System.gc()
     }
 
     override fun onDestroy() {
         _isRunning.value = false
         removeFloatingHandle()
-        dismissOverlayPanel()
+        
+        // Fully release overlay view and dispose composition when Service is explicitly stopped
+        overlayComposeView?.let {
+            try {
+                if (it.parent != null) {
+                    windowManager.removeViewImmediate(it)
+                }
+                it.disposeComposition()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            overlayComposeView = null
+        }
+        overlayPanelLifecycleOwner?.let {
+            it.onPause()
+            it.onStop()
+            it.onDestroy()
+            overlayPanelLifecycleOwner = null
+        }
+        
+        // Optimize and release SQLite Memory back to system on service destroy fast
+        database?.let { db ->
+            try {
+                db.openHelper.writableDatabase.execSQL("PRAGMA shrink_memory;")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        try {
+            AppDatabase.closeDatabase()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        database = null
+        
         serviceScope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        database?.let { db ->
+            try {
+                db.openHelper.writableDatabase.execSQL("PRAGMA shrink_memory;")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        System.runFinalization()
+        System.gc()
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        database?.let { db ->
+            try {
+                db.openHelper.writableDatabase.execSQL("PRAGMA shrink_memory;")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        System.runFinalization()
+        System.gc()
+    }
 }
 
 // ---------------------- JETPACK COMPOSE OVERLAY COMPOSABLES ----------------------
-
-@Composable
-fun FloatingHandleUi(
-    opacity: Float,
-    heightDp: Int,
-    side: String,
-    dragAction: String,
-    onTap: () -> Unit,
-    onVerticalDrag: (Float) -> Unit,
-    onDragEnd: () -> Unit,
-    onVolumeAdjust: (Boolean) -> Unit
-) {
-    var accumulatedDragY by remember { mutableStateOf(0f) }
-    Box(
-        modifier = Modifier
-            .width(18.dp)
-            .height(heightDp.dp)
-            .clip(
-                if (side == "LEFT") RoundedCornerShape(topEnd = 16.dp, bottomEnd = 16.dp)
-                else RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp)
-            )
-            .background(
-                Brush.horizontalGradient(
-                    colors = if (side == "LEFT") listOf(
-                        MaterialTheme.colorScheme.primary.copy(alpha = opacity),
-                        MaterialTheme.colorScheme.primary.copy(alpha = opacity * 0.4f)
-                    ) else listOf(
-                        MaterialTheme.colorScheme.primary.copy(alpha = opacity * 0.4f),
-                        MaterialTheme.colorScheme.primary.copy(alpha = opacity)
-                    )
-                )
-            )
-            .pointerInput(dragAction) {
-                detectDragGestures(
-                    onDragStart = {
-                        accumulatedDragY = 0f
-                    },
-                    onDragEnd = {
-                        if (dragAction == "MOVE") {
-                            onDragEnd()
-                        }
-                    },
-                    onDragCancel = {
-                        if (dragAction == "MOVE") {
-                            onDragEnd()
-                        }
-                    },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        if (dragAction == "VOLUME") {
-                            accumulatedDragY += dragAmount.y
-                            // 32f pixels of vertical drag corresponds to 1 volume step (smooth and responsive)
-                            val threshold = 32f
-                            if (accumulatedDragY <= -threshold) {
-                                onVolumeAdjust(true) // drag up -> increase music volume
-                                accumulatedDragY = 0f
-                            } else if (accumulatedDragY >= threshold) {
-                                onVolumeAdjust(false) // drag down -> decrease music volume
-                                accumulatedDragY = 0f
-                            }
-                        } else {
-                            onVerticalDrag(dragAmount.y)
-                        }
-                    }
-                )
-            }
-            .pointerInput(Unit) {
-                detectTapGestures(onTap = { onTap() })
-            },
-        contentAlignment = Alignment.Center
-    ) {
-        // Subtle vertical ripple bar
-        Box(
-            modifier = Modifier
-                .width(3.dp)
-                .height((heightDp * 0.5f).dp)
-                .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.8f))
-        )
-    }
-}
 
 @Composable
 fun OverlayPanelUi(
@@ -630,11 +678,8 @@ fun OverlayPanelUi(
 
     // Layout configuration
     val isLeft = settings.handleSide == "LEFT"
-    var isCompact by remember { mutableStateOf(settings.isCompactMode) }
-    
-    LaunchedEffect(isCompact) {
-        settings.isCompactMode = isCompact
-    }
+    val isCompactState = settings.isCompactModeFlow.collectAsState()
+    val isCompact = isCompactState.value
 
     val density = LocalDensity.current
     val handleYOffsetDp = remember(settings.handleYOffset) {
@@ -685,13 +730,13 @@ fun OverlayPanelUi(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
-                            onClick = { isCompact = false },
+                            onClick = { settings.isCompactMode = false },
                             modifier = Modifier
                                 .background(Color.White.copy(alpha = 0.08f), CircleShape)
                                 .size(28.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Tune,
+                                imageVector = ImageVector.vectorResource(id = R.drawable.ic_tune),
                                 contentDescription = "Hiện đầy đủ",
                                 tint = Color.White.copy(alpha = 0.9f),
                                 modifier = Modifier.size(15.dp)
@@ -723,7 +768,7 @@ fun OverlayPanelUi(
                                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
                             }
                         },
-                        icon = Icons.Default.MusicNote,
+                        icon = ImageVector.vectorResource(id = R.drawable.ic_music_note),
                         label = "Media",
                         height = 180.dp,
                         width = 62.dp
@@ -753,7 +798,7 @@ fun OverlayPanelUi(
                             .size(32.dp)
                     ) {
                         Icon(
-                            imageVector = if (mediaVolume > 0) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                            imageVector = if (mediaVolume > 0) ImageVector.vectorResource(id = R.drawable.ic_volume_up) else ImageVector.vectorResource(id = R.drawable.ic_volume_off),
                             contentDescription = "Quick Mute Media",
                             tint = if (mediaVolume > 0) MaterialTheme.colorScheme.primary else Color.Gray,
                             modifier = Modifier.size(15.dp)
@@ -795,7 +840,7 @@ fun OverlayPanelUi(
                                 color = MaterialTheme.colorScheme.primaryContainer
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.VolumeUp,
+                                    imageVector = ImageVector.vectorResource(id = R.drawable.ic_volume_up),
                                     contentDescription = "Volume Icon",
                                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
                                     modifier = Modifier
@@ -817,7 +862,7 @@ fun OverlayPanelUi(
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             IconButton(
-                                onClick = { isCompact = true },
+                                onClick = { settings.isCompactMode = true },
                                 modifier = Modifier
                                     .background(Color.White.copy(alpha = 0.1f), CircleShape)
                                     .size(32.dp)
@@ -872,7 +917,7 @@ fun OverlayPanelUi(
                                         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
                                     }
                                 },
-                                icon = Icons.Default.MusicNote,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_music_note),
                                 label = "Media"
                             )
 
@@ -886,7 +931,7 @@ fun OverlayPanelUi(
                                         audioManager.setStreamVolume(AudioManager.STREAM_RING, target, 0)
                                     }
                                 },
-                                icon = Icons.Default.RingVolume,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_ring_volume),
                                 label = "Chuông"
                             )
 
@@ -900,7 +945,7 @@ fun OverlayPanelUi(
                                         audioManager.setStreamVolume(AudioManager.STREAM_NOTIFICATION, target, 0)
                                     }
                                 },
-                                icon = Icons.Default.Notifications,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_notifications),
                                 label = "T.Báo"
                             )
 
@@ -914,7 +959,7 @@ fun OverlayPanelUi(
                                         audioManager.setStreamVolume(AudioManager.STREAM_ALARM, target, 0)
                                     }
                                 },
-                                icon = Icons.Default.Alarm,
+                                icon = ImageVector.vectorResource(id = R.drawable.ic_alarm),
                                 label = "Báo thức"
                             )
                         }
@@ -997,7 +1042,7 @@ fun OverlayPanelUi(
                                         )
                                     }
                                     Icon(
-                                        imageVector = Icons.Default.CheckCircle,
+                                        imageVector = ImageVector.vectorResource(id = R.drawable.ic_check_circle),
                                         contentDescription = "Applied",
                                         tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
                                         modifier = Modifier.size(16.dp)
@@ -1247,6 +1292,185 @@ class ServiceLifecycleOwner : LifecycleOwner, ViewModelStoreOwner, SavedStateReg
     fun onDestroy() {
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         store.clear()
+    }
+}
+
+class FloatingHandleView(
+    context: Context,
+    private val settings: VolumeSettings,
+    private val onVolumeAdjust: (Boolean) -> Unit,
+    private val onVerticalDrag: (Float) -> Unit,
+    private val onDragEnd: () -> Unit,
+    private val onTap: () -> Unit
+) : android.view.View(context) {
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val innerBarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb((255 * 0.8f).toInt(), 255, 255, 255)
+        style = Paint.Style.FILL
+    }
+
+    // Reusable structures to eliminate dynamic object allocations during paint passes
+    private val drawPath = Path()
+    private val drawRect = RectF()
+    private val innerBarRect = RectF()
+    private var cachedWidth = -1f
+    private var cachedHeight = -1f
+    private var cachedSide = ""
+
+    private var initialTouchY = 0f
+    private var lastTouchY = 0f
+    private var isDragging = false
+    private var accumulatedDragY = 0f
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private var downTime = 0L
+
+    init {
+        setLayerType(LAYER_TYPE_HARDWARE, null)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        
+        val opacity = settings.handleOpacity
+        if (opacity <= 0.01f) {
+            // Invisible/Transparent. Skip drawing completely to achieve zero GPU rendering and allocation overhead.
+            return
+        }
+        
+        val side = settings.handleSide
+        
+        // Dynamically recreate shader and path ONLY if size or configuration changed (excluding opacity for 0 allocations)
+        if (w != cachedWidth || h != cachedHeight || side != cachedSide) {
+            cachedWidth = w
+            cachedHeight = h
+            cachedSide = side
+            
+            val primaryColorInt = 0xFFD0BCFF.toInt()
+            val shader = if (side == "LEFT") {
+                LinearGradient(
+                    0f, 0f, w, 0f,
+                    primaryColorInt,
+                    adjustAlpha(primaryColorInt, 0.4f),
+                    Shader.TileMode.CLAMP
+                )
+            } else {
+                LinearGradient(
+                    0f, 0f, w, 0f,
+                    adjustAlpha(primaryColorInt, 0.4f),
+                    primaryColorInt,
+                    Shader.TileMode.CLAMP
+                )
+            }
+            paint.shader = shader
+            paint.style = Paint.Style.FILL
+            
+            drawPath.reset()
+            drawRect.set(0f, 0f, w, h)
+            val r = 16f * resources.displayMetrics.density // 16dp rounded corner
+            
+            if (side == "LEFT") {
+                val radii = floatArrayOf(
+                    0f, 0f,       // top-left
+                    r, r,         // top-right
+                    r, r,         // bottom-right
+                    0f, 0f        // bottom-left
+                )
+                drawPath.addRoundRect(drawRect, radii, Path.Direction.CW)
+            } else {
+                val radii = floatArrayOf(
+                    r, r,         // top-left
+                    0f, 0f,       // top-right
+                    0f, 0f,       // bottom-right
+                    r, r          // bottom-left
+                )
+                drawPath.addRoundRect(drawRect, radii, Path.Direction.CW)
+            }
+            
+            // Recompute handle line coordinates once to avoid RectF allocation in onDraw
+            val barW = 3f * resources.displayMetrics.density
+            val barH = h * 0.5f
+            val left = (w - barW) / 2f
+            val top = (h - barH) / 2f
+            innerBarRect.set(left, top, left + barW, top + barH)
+        }
+        
+        // Dynamically modulate paint alphas for 0 object recreation on drag
+        paint.alpha = (opacity * 255).toInt().coerceIn(0, 255)
+        innerBarPaint.alpha = (opacity * 255 * 0.8f).toInt().coerceIn(0, 255)
+        
+        canvas.drawPath(drawPath, paint)
+        
+        // Draw the subtle inner vertical handle line in the center using precomputed RectF
+        val rx = 1.5f * resources.displayMetrics.density
+        canvas.drawRoundRect(innerBarRect, rx, rx, innerBarPaint)
+    }
+
+    private fun adjustAlpha(color: Int, factor: Float): Int {
+        val alpha = Math.round(android.graphics.Color.alpha(color) * factor).coerceIn(0, 255)
+        val red = android.graphics.Color.red(color)
+        val green = android.graphics.Color.green(color)
+        val blue = android.graphics.Color.blue(color)
+        return android.graphics.Color.argb(alpha, red, green, blue)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val dragAction = settings.handleDragAction
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                initialTouchY = event.rawY
+                lastTouchY = event.rawY
+                accumulatedDragY = 0f
+                isDragging = false
+                downTime = System.currentTimeMillis()
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val deltaY = event.rawY - lastTouchY
+                val totalDeltaY = event.rawY - initialTouchY
+                lastTouchY = event.rawY
+                
+                if (!isDragging && abs(totalDeltaY) > touchSlop) {
+                    isDragging = true
+                }
+                
+                if (isDragging) {
+                    if (dragAction == "VOLUME") {
+                        accumulatedDragY += deltaY
+                        val threshold = 24f * resources.displayMetrics.density
+                        if (accumulatedDragY <= -threshold) {
+                            onVolumeAdjust(true)
+                            accumulatedDragY = 0f
+                        } else if (accumulatedDragY >= threshold) {
+                            onVolumeAdjust(false)
+                            accumulatedDragY = 0f
+                        }
+                    } else {
+                        onVerticalDrag(deltaY)
+                    }
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val duration = System.currentTimeMillis() - downTime
+                val totalDeltaY = event.rawY - initialTouchY
+                
+                if (!isDragging && abs(totalDeltaY) < touchSlop && duration < 300) {
+                    onTap()
+                } else {
+                    if (isDragging && dragAction == "MOVE") {
+                        onDragEnd()
+                    }
+                }
+                isDragging = false
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
     }
 }
 
